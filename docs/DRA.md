@@ -141,3 +141,12 @@ fake as the existing suites. Standalone Go unit tests follow the repository's
 existing unit-test pattern and keep these checks outside the Ginkgo suites'
 envtest lifecycle. Helm renders fixture values into a temporary directory; it
 never installs the chart.
+
+Linode tests create a fresh `fake.NewLinodeClient` per case, configure shared
+`AtomicPtr` fixtures and `MockedFunction.Error`, assert `Calls`/`CalledWithInput`,
+and register `Reset`/cache `Flush` with `t.Cleanup`. Thin local adapters add
+behavior hooks to catalog methods whose shared fake implementation has none;
+they do not implement a second Linode fake. The allocator's NodeClaim adapter
+remains local because pinned core's equivalent test fixture is unexported.
+Its DeviceClass client is an isolated controller-runtime in-memory fake; no
+API-server environment is created.

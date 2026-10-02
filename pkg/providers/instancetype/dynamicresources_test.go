@@ -108,15 +108,23 @@ func TestDRAListGetAndOfferingCache(t *testing.T) {
 	ctx := draContext(t)
 	types := []linodego.LinodeType{draType("test-gpu-plan", 2), draType("test-cpu-plan", 0)}
 	api := &draCatalogMock{LinodeClient: fake.NewLinodeClient()}
+	t.Cleanup(api.Reset)
 	api.ListTypesOutput.Set(&types)
 	offerings := []linodego.RegionAvailability{
 		{Region: fake.DefaultRegion, Plan: types[0].ID, Available: true},
 		{Region: fake.DefaultRegion, Plan: types[1].ID, Available: true},
 	}
 	api.GetRegionAvailabilityOutput.Set(&offerings)
+	instanceTypesCache := cache.New(cache.NoExpiration, 0)
+	offeringCache := cache.New(cache.NoExpiration, 0)
+	discoveredCapacityCache := cache.New(cache.NoExpiration, 0)
+	unavailableOfferings := linodecache.NewUnavailableOfferings()
+	for _, c := range []*cache.Cache{instanceTypesCache, offeringCache, discoveredCapacityCache} {
+		t.Cleanup(c.Flush)
+	}
+	t.Cleanup(unavailableOfferings.Flush)
 	provider := instancetype.NewDefaultProvider(api, instancetype.NewDefaultResolver(fake.DefaultRegion, "test-gpu-plan"),
-		cache.New(cache.NoExpiration, 0), cache.New(cache.NoExpiration, 0), cache.New(cache.NoExpiration, 0),
-		linodecache.NewUnavailableOfferings())
+		instanceTypesCache, offeringCache, discoveredCapacityCache, unavailableOfferings)
 	if err := provider.UpdateInstanceTypes(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -158,8 +166,12 @@ func TestDRAListGetAndOfferingCache(t *testing.T) {
 			t.Fatal("InjectOfferings mutated the cached instance type")
 		}
 	}
-	if api.listCalls != 1 || api.availabilityCalls != 1 {
-		t.Fatalf("List/Get unexpectedly called the catalog API: %+v", api)
+	if api.ListTypesBehavior.Calls() != 1 || api.RegionAvailabilityBehavior.Calls() != 1 {
+		t.Fatalf("List/Get unexpectedly called the catalog API: types=%d, availability=%d",
+			api.ListTypesBehavior.Calls(), api.RegionAvailabilityBehavior.Calls())
+	}
+	if region := *api.RegionAvailabilityBehavior.CalledWithInput.At(0); region != fake.DefaultRegion {
+		t.Fatalf("availability requested region %q, want %q", region, fake.DefaultRegion)
 	}
 	// A refreshed API count invalidates the cached prediction.
 	types[0].GPUs = 1
@@ -310,6 +322,11 @@ func draClaim(name string) *resourcev1.ResourceClaim {
 	}
 }
 
+// Pinned core uses an unexported fakeNodeClaim in its allocator tests. There is
+// no reusable exported fixture for this interface; this adapter supplies only
+// in-memory identity and the provider's real ResourceSlice templates.
+var _ dynamicresources.NodeClaim = (*draNodeClaimMock)(nil)
+
 type draNodeClaimMock struct {
 	name         string
 	instanceType *cloudprovider.InstanceType
@@ -332,18 +349,38 @@ func (n *draNodeClaimMock) ResourceSlices() map[dynamicresources.InstanceTypeID]
 	return map[dynamicresources.InstanceTypeID][]dynamicresources.ResourceSlice{unique.Make(n.instanceType.Name): slices}
 }
 
-// Track catalog reads while reusing the repository's configurable Linode fake.
+// The shared fake's catalog methods return AtomicPtr fixtures directly, without
+// invoking their behavior hooks. This adapter retains those fixtures and adds
+// the repository's MockedFunction call tracking; region uses its actual string
+// argument rather than the shared availability hook's ListOptions input type.
 type draCatalogMock struct {
 	*fake.LinodeClient
-	listCalls, availabilityCalls int
+	RegionAvailabilityBehavior fake.MockedFunction[string, []linodego.RegionAvailability]
 }
 
 func (m *draCatalogMock) ListTypes(ctx context.Context, opts *linodego.ListOptions) ([]linodego.LinodeType, error) {
-	m.listCalls++
-	return m.LinodeClient.ListTypes(ctx, opts)
+	output, err := m.ListTypesBehavior.Invoke(opts, func(opts *linodego.ListOptions) (*[]linodego.LinodeType, error) {
+		types, err := m.LinodeClient.ListTypes(ctx, opts)
+		return &types, err
+	})
+	if output == nil {
+		return nil, err
+	}
+	return *output, err
 }
 
 func (m *draCatalogMock) GetRegionAvailability(ctx context.Context, region string) ([]linodego.RegionAvailability, error) {
-	m.availabilityCalls++
-	return m.LinodeClient.GetRegionAvailability(ctx, region)
+	output, err := m.RegionAvailabilityBehavior.Invoke(&region, func(region *string) (*[]linodego.RegionAvailability, error) {
+		offerings, err := m.LinodeClient.GetRegionAvailability(ctx, *region)
+		return &offerings, err
+	})
+	if output == nil {
+		return nil, err
+	}
+	return *output, err
+}
+
+func (m *draCatalogMock) Reset() {
+	m.LinodeClient.Reset()
+	m.RegionAvailabilityBehavior.Reset()
 }
