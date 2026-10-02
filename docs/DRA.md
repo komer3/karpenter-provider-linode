@@ -123,7 +123,7 @@ With the repository's pinned Go and Helm tools available, run:
 ```sh
 just test-dra-unit
 # Equivalent command; the anchored name filter excludes existing envtest suites:
-go test ./pkg/operator/options ./pkg/operator ./pkg/providers/instancetype ./charts/karpenter/tests -run '^TestDRA' -count=1
+go test ./pkg/operator/options ./pkg/operator ./pkg/providers/instancetype -run '^TestDRA' -count=1
 ```
 
 The tests cover explicit opt-in, exact whole-GPU inventory, API-count refresh,
@@ -132,3 +132,12 @@ with a fake DeviceClass client, option validation, and rendered environment
 variables and least-privilege RBAC. The catalog and operator calls are mocked;
 Helm only renders local files with fixture values. Do not substitute the general
 `just test` recipe: it starts envtest and is outside this prototype's test scope.
+
+The checks live beside the code they exercise: `pkg/operator/options` covers
+flags and Helm rendering, `pkg/operator` covers startup validation, and
+`pkg/providers/instancetype/dynamicresources_test.go` covers inventory, caching,
+and allocation together. They use the same external test packages and Linode
+fake as the existing suites. Standalone Go unit tests follow the repository's
+existing unit-test pattern and keep these checks outside the Ginkgo suites'
+envtest lifecycle. Helm renders fixture values into a temporary directory; it
+never installs the chart.

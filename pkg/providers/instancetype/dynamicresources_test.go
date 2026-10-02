@@ -3,7 +3,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-	http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,24 +12,32 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package instancetype
+package instancetype_test
 
 import (
 	"context"
 	"fmt"
 	"reflect"
 	"testing"
+	"unique"
 
 	"github.com/linode/linodego/v2"
 	"github.com/patrickmn/go-cache"
 	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
+	"sigs.k8s.io/karpenter/pkg/scheduling"
+	"sigs.k8s.io/karpenter/pkg/scheduling/dynamicresources"
 
 	v1 "github.com/linode/karpenter-provider-linode/pkg/apis/v1alpha1"
 	linodecache "github.com/linode/karpenter-provider-linode/pkg/cache"
-	sdk "github.com/linode/karpenter-provider-linode/pkg/linode"
+	"github.com/linode/karpenter-provider-linode/pkg/fake"
 	"github.com/linode/karpenter-provider-linode/pkg/operator/options"
+	"github.com/linode/karpenter-provider-linode/pkg/providers/instancetype"
+	"github.com/linode/karpenter-provider-linode/pkg/test"
 )
 
 // These tests use only an in-memory catalog mock. They do not start envtest or
@@ -54,7 +62,7 @@ func TestDRAInventoryOptIn(t *testing.T) {
 			t.Parallel()
 			info := draType("test-gpu-plan", tc.gpus)
 			info.AcceleratedDevices = tc.accelerated
-			it := NewDefaultResolver("test-region", tc.allowed...).Resolve(draContext(t), &info, draNodeClass())
+			it := instancetype.NewDefaultResolver(fake.DefaultRegion, tc.allowed...).Resolve(draContext(t), &info, draNodeClass())
 			assertDRAInventory(t, it, tc.want)
 			if _, ok := it.Capacity[corev1.ResourceName("nvidia.com/gpu")]; ok {
 				t.Fatal("DRA inventory must not advertise legacy scalar GPU capacity")
@@ -69,7 +77,7 @@ func TestDRAInventoryOptIn(t *testing.T) {
 func TestDRAInventoryIsolation(t *testing.T) {
 	t.Parallel()
 	allowed := []string{"test-gpu-plan"}
-	resolver := NewDefaultResolver("test-region", allowed...)
+	resolver := instancetype.NewDefaultResolver(fake.DefaultRegion, allowed...)
 	allowed[0] = "another-type"
 	info := draType("test-gpu-plan", 2)
 	first := resolver.Resolve(draContext(t), &info, draNodeClass())
@@ -87,9 +95,9 @@ func TestDRAInventoryIsolation(t *testing.T) {
 func TestDRACacheKey(t *testing.T) {
 	t.Parallel()
 	nodeClass := draNodeClass()
-	enabled := NewDefaultResolver("test-region", "a", "b").CacheKey(nodeClass)
-	reordered := NewDefaultResolver("test-region", "b", "a", "a").CacheKey(nodeClass)
-	disabled := NewDefaultResolver("test-region").CacheKey(nodeClass)
+	enabled := instancetype.NewDefaultResolver(fake.DefaultRegion, "a", "b").CacheKey(nodeClass)
+	reordered := instancetype.NewDefaultResolver(fake.DefaultRegion, "b", "a", "a").CacheKey(nodeClass)
+	disabled := instancetype.NewDefaultResolver(fake.DefaultRegion).CacheKey(nodeClass)
 	if enabled != reordered || enabled == disabled {
 		t.Fatalf("cache key does not distinguish normalized DRA configuration: %q, %q, %q", enabled, reordered, disabled)
 	}
@@ -98,8 +106,15 @@ func TestDRACacheKey(t *testing.T) {
 func TestDRAListGetAndOfferingCache(t *testing.T) {
 	t.Parallel()
 	ctx := draContext(t)
-	api := &draCatalogMock{types: []linodego.LinodeType{draType("test-gpu-plan", 2), draType("test-cpu-plan", 0)}}
-	provider := NewDefaultProvider(api, NewDefaultResolver("test-region", "test-gpu-plan"),
+	types := []linodego.LinodeType{draType("test-gpu-plan", 2), draType("test-cpu-plan", 0)}
+	api := &draCatalogMock{LinodeClient: fake.NewLinodeClient()}
+	api.ListTypesOutput.Set(&types)
+	offerings := []linodego.RegionAvailability{
+		{Region: fake.DefaultRegion, Plan: types[0].ID, Available: true},
+		{Region: fake.DefaultRegion, Plan: types[1].ID, Available: true},
+	}
+	api.GetRegionAvailabilityOutput.Set(&offerings)
+	provider := instancetype.NewDefaultProvider(api, instancetype.NewDefaultResolver(fake.DefaultRegion, "test-gpu-plan"),
 		cache.New(cache.NoExpiration, 0), cache.New(cache.NoExpiration, 0), cache.New(cache.NoExpiration, 0),
 		linodecache.NewUnavailableOfferings())
 	if err := provider.UpdateInstanceTypes(ctx); err != nil {
@@ -147,7 +162,8 @@ func TestDRAListGetAndOfferingCache(t *testing.T) {
 		t.Fatalf("List/Get unexpectedly called the catalog API: %+v", api)
 	}
 	// A refreshed API count invalidates the cached prediction.
-	api.types[0].GPUs = 1
+	types[0].GPUs = 1
+	api.ListTypesOutput.Set(&types)
 	if err := provider.UpdateInstanceTypes(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -193,33 +209,141 @@ func assertDRAInventory(t *testing.T, it *cloudprovider.InstanceType, count int)
 
 func draContext(t *testing.T) context.Context {
 	t.Helper()
-	return options.ToContext(t.Context(), &options.Options{Mode: "lke", ClusterRegion: "test-region", VMMemoryOverheadPercent: 0.075})
+	return options.ToContext(t.Context(), test.Options())
 }
 
 func draNodeClass() *v1.LinodeNodeClass {
-	return &v1.LinodeNodeClass{ObjectMeta: metav1.ObjectMeta{Name: "test"}}
+	return test.LinodeNodeClass(v1.LinodeNodeClass{ObjectMeta: metav1.ObjectMeta{Name: "test"}})
 }
 
 func draType(name string, gpus int) linodego.LinodeType {
 	return linodego.LinodeType{ID: name, GPUs: gpus, Memory: 32768, VCPUs: 8}
 }
 
+const nvidiaWholeGPUSelector = "device.driver == 'gpu.nvidia.com' && device.attributes['gpu.nvidia.com'].type == 'gpu'"
+
+// Exercise the pinned core's actual allocation/CEL contract using a fake
+// DeviceClass client and in-memory NodeClaims. No API server is started.
+func TestDRAWholeGPUAllocation(t *testing.T) {
+	t.Parallel()
+	ctx := draContext(t)
+	info := draType("test-gpu-plan", 2)
+	it := instancetype.NewDefaultResolver(fake.DefaultRegion, info.ID).Resolve(ctx, &info, draNodeClass())
+	allocator := draAllocator(t, nvidiaWholeGPUSelector)
+	nodeA := &draNodeClaimMock{name: "node-a", instanceType: it}
+	nodeB := &draNodeClaimMock{name: "node-b", instanceType: it}
+	for _, name := range []string{"claim-a", "claim-b"} {
+		result, err := allocator.Allocate(ctx, nodeA, []*resourcev1.ResourceClaim{draClaim(name)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(result.InstanceTypes, nodeA.InstanceTypes()) || result.Allocation == nil {
+			t.Fatalf("expected a GPU allocation on the selected instance type, got %+v", result)
+		}
+		result.Allocation.Commit(ctx)
+	}
+	if _, err := allocator.Allocate(ctx, nodeA, []*resourcev1.ResourceClaim{draClaim("claim-c")}); err == nil {
+		t.Fatal("a third exclusive claim must not fit on two GPUs")
+	}
+	result, err := allocator.Allocate(ctx, nodeB, []*resourcev1.ResourceClaim{draClaim("claim-c")})
+	if err != nil || result.Allocation == nil {
+		t.Fatalf("identical templates on a different node must have independent capacity: %v", err)
+	}
+	result.Allocation.Commit(ctx)
+	if _, err := allocator.Allocate(ctx, nodeA, []*resourcev1.ResourceClaim{draClaim("claim-a")}); err != nil {
+		t.Fatalf("reusing an already reserved claim must not consume another GPU: %v", err)
+	}
+}
+
+func TestDRASelectorAndOptInRejection(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, selector string
+		enabled        bool
+	}{
+		{name: "not opted in", selector: nvidiaWholeGPUSelector},
+		{name: "wrong driver", selector: "device.driver == 'other.example.com'", enabled: true},
+		{name: "MIG", selector: "device.attributes['gpu.nvidia.com'].type == 'mig'", enabled: true},
+		{name: "unmodeled product", selector: nvidiaWholeGPUSelector + " && device.attributes['gpu.nvidia.com'].productName == 'NVIDIA H100'", enabled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			info := draType("test-gpu-plan", 2)
+			var allowed []string
+			if tc.enabled {
+				allowed = []string{info.ID}
+			}
+			it := instancetype.NewDefaultResolver(fake.DefaultRegion, allowed...).Resolve(draContext(t), &info, draNodeClass())
+			node := &draNodeClaimMock{name: "node", instanceType: it}
+			if _, err := draAllocator(t, tc.selector).Allocate(draContext(t), node, []*resourcev1.ResourceClaim{draClaim("claim")}); err == nil {
+				t.Fatal("unsupported request unexpectedly matched the predicted inventory")
+			}
+		})
+	}
+}
+
+func draAllocator(t *testing.T, selector string) *dynamicresources.Allocator {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := resourcev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	class := &resourcev1.DeviceClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "gpu.nvidia.com"},
+		Spec: resourcev1.DeviceClassSpec{Selectors: []resourcev1.DeviceSelector{{
+			CEL: &resourcev1.CELDeviceSelector{Expression: selector},
+		}}},
+	}
+	client := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(class).Build()
+	return dynamicresources.NewAllocator(nil, dynamicresources.AllocatedDeviceState{}, nil, client, nil)
+}
+
+func draClaim(name string) *resourcev1.ResourceClaim {
+	return &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Spec: resourcev1.ResourceClaimSpec{Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+			Name: "gpu",
+			Exactly: &resourcev1.ExactDeviceRequest{
+				DeviceClassName: "gpu.nvidia.com", AllocationMode: resourcev1.DeviceAllocationModeExactCount, Count: 1,
+			},
+		}}}},
+	}
+}
+
+type draNodeClaimMock struct {
+	name         string
+	instanceType *cloudprovider.InstanceType
+}
+
+func (n *draNodeClaimMock) ID() dynamicresources.NodeClaimID        { return unique.Make(n.name) }
+func (n *draNodeClaimMock) NodeName() string                        { return "" }
+func (n *draNodeClaimMock) NodePoolID() dynamicresources.NodePoolID { return unique.Make("test-pool") }
+func (n *draNodeClaimMock) Requirements() scheduling.Requirements {
+	return scheduling.NewRequirements()
+}
+func (n *draNodeClaimMock) InstanceTypes() []dynamicresources.InstanceTypeID {
+	return []dynamicresources.InstanceTypeID{unique.Make(n.instanceType.Name)}
+}
+func (n *draNodeClaimMock) ResourceSlices() map[dynamicresources.InstanceTypeID][]dynamicresources.ResourceSlice {
+	slices := make([]dynamicresources.ResourceSlice, len(n.instanceType.DynamicResources.ResourceSliceTemplates))
+	for i, template := range n.instanceType.DynamicResources.ResourceSliceTemplates {
+		slices[i] = dynamicresources.NewTemplateSlice(template)
+	}
+	return map[dynamicresources.InstanceTypeID][]dynamicresources.ResourceSlice{unique.Make(n.instanceType.Name): slices}
+}
+
+// Track catalog reads while reusing the repository's configurable Linode fake.
 type draCatalogMock struct {
-	sdk.LinodeAPI                // Unexpected API calls panic rather than reaching a service.
-	types                        []linodego.LinodeType
+	*fake.LinodeClient
 	listCalls, availabilityCalls int
 }
 
-func (m *draCatalogMock) ListTypes(context.Context, *linodego.ListOptions) ([]linodego.LinodeType, error) {
+func (m *draCatalogMock) ListTypes(ctx context.Context, opts *linodego.ListOptions) ([]linodego.LinodeType, error) {
 	m.listCalls++
-	return append([]linodego.LinodeType(nil), m.types...), nil
+	return m.LinodeClient.ListTypes(ctx, opts)
 }
 
-func (m *draCatalogMock) GetRegionAvailability(_ context.Context, region string) ([]linodego.RegionAvailability, error) {
+func (m *draCatalogMock) GetRegionAvailability(ctx context.Context, region string) ([]linodego.RegionAvailability, error) {
 	m.availabilityCalls++
-	offerings := make([]linodego.RegionAvailability, len(m.types))
-	for i, info := range m.types {
-		offerings[i] = linodego.RegionAvailability{Region: region, Plan: info.ID, Available: true}
-	}
-	return offerings, nil
+	return m.LinodeClient.GetRegionAvailability(ctx, region)
 }

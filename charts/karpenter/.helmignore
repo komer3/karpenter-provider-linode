@@ -21,5 +21,3 @@
 .idea/
 *.tmproj
 .vscode/
-# Go unit tests render this chart locally with mocked values.
-tests/
