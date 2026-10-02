@@ -17,6 +17,7 @@ package options
 import (
 	"fmt"
 	"net/url"
+	"strings"
 
 	"github.com/awslabs/operatorpkg/serrors"
 	"go.uber.org/multierr"
@@ -28,7 +29,23 @@ func (o *Options) Validate() error {
 		o.validateVMMemoryOverheadPercent(),
 		o.validateRequiredFields(),
 		o.validateMode(),
+		o.validateNVIDIADRA(),
 	)
+}
+
+func (o *Options) validateNVIDIADRA() error {
+	if o.NVIDIADRAInstanceTypes == "" {
+		return nil
+	}
+	if o.Mode != "lke" {
+		return fmt.Errorf("nvidia-dra-instance-types is only supported in lke mode")
+	}
+	for _, name := range o.NVIDIADRAInstanceTypeNames() {
+		if name == "" || strings.ContainsAny(name, " \t\r\n") {
+			return fmt.Errorf("nvidia-dra-instance-types must contain comma-separated, non-empty instance type IDs without whitespace")
+		}
+	}
+	return nil
 }
 
 func (o *Options) validateEndpoint() error {

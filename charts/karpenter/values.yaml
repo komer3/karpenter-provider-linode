@@ -179,6 +179,11 @@ settings:
   clusterEndpoint: ""
   # -- Operating mode: 'lke' for LKE NodePool provisioning, 'instance' for direct Linode instances.
   mode: "lke"
+  dra:
+    # -- Experimental opt-in for exact LKE instance type IDs verified with the exclusive whole-GPU NVIDIA DRA driver.
+    # An empty list disables predicted DRA inventory. A nonempty list also enables core DRA scheduling and read-only DRA RBAC.
+    # Read docs/DRA.md before enabling; this does not install or configure the GPU driver.
+    nvidiaGPUInstanceTypes: []
   # -- Maximum time to wait for an LKE node pool instance to become claimable.
   lkeCreateDeadline: 10s
   # -- Maximum time to wait for LKE instance tags to be observed after claim.

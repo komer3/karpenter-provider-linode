@@ -95,6 +95,10 @@ lint-chart target_branch='main':
 vulncheck: tools
 	govulncheck ./pkg/...
 
+# Run only mocked DRA unit tests and local Helm template fixtures (no envtest or cluster)
+test-dra-unit:
+	go test ./pkg/operator/options ./pkg/operator ./pkg/providers/instancetype ./charts/karpenter/tests -run '^TestDRA' -count=1
+
 # Run unit tests
 test: tools
 	#!/usr/bin/env bash

@@ -25,6 +25,7 @@ import (
 	"github.com/samber/lo"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/sets"
 	karpv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	"sigs.k8s.io/karpenter/pkg/cloudprovider"
 	"sigs.k8s.io/karpenter/pkg/scheduling"
@@ -46,11 +47,12 @@ type Resolver interface {
 }
 
 type DefaultResolver struct {
-	region string
+	region                 string
+	nvidiaDRAInstanceTypes sets.Set[string]
 }
 
 func (d DefaultResolver) CacheKey(nodeClass NodeClass) string {
-	return nodeClass.GetName()
+	return fmt.Sprintf("%s/%s", nodeClass.GetName(), strings.Join(sets.List(d.nvidiaDRAInstanceTypes), ","))
 }
 
 func (d DefaultResolver) Resolve(ctx context.Context, info *linodego.LinodeType, nodeClass NodeClass) *cloudprovider.InstanceType {
@@ -62,7 +64,7 @@ func (d DefaultResolver) Resolve(ctx context.Context, info *linodego.LinodeType,
 	if resolved := nodeClass.KubeletConfiguration(); resolved != nil {
 		kc = resolved
 	}
-	return NewInstanceType(
+	it := NewInstanceType(
 		ctx,
 		info,
 		d.region,
@@ -73,11 +75,16 @@ func (d DefaultResolver) Resolve(ctx context.Context, info *linodego.LinodeType,
 		kc.EvictionHard,
 		kc.EvictionSoft,
 	)
+	if d.nvidiaDRAInstanceTypes.Has(info.ID) {
+		it.DynamicResources = nvidiaGPUResources(info)
+	}
+	return it
 }
 
-func NewDefaultResolver(region string) *DefaultResolver {
+func NewDefaultResolver(region string, nvidiaDRAInstanceTypes ...string) *DefaultResolver {
 	return &DefaultResolver{
-		region: region,
+		region:                 region,
+		nvidiaDRAInstanceTypes: sets.New(nvidiaDRAInstanceTypes...),
 	}
 }
 

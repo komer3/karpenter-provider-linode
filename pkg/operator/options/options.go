@@ -20,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	coreoptions "sigs.k8s.io/karpenter/pkg/operator/options"
@@ -41,6 +42,7 @@ type Options struct {
 	VMMemoryOverheadPercent   float64
 	DisableDryRun             bool
 	Mode                      string
+	NVIDIADRAInstanceTypes    string
 	LKECreateDeadline         time.Duration
 	LKETagVerificationTimeout time.Duration
 	LKERetryDelay             time.Duration
@@ -53,6 +55,7 @@ func (o *Options) AddFlags(fs *coreoptions.FlagSet) {
 	fs.Float64Var(&o.VMMemoryOverheadPercent, "vm-memory-overhead-percent", utils.WithDefaultFloat64("VM_MEMORY_OVERHEAD_PERCENT", 0.075), "The VM memory overhead as a percent that will be subtracted from the total memory for all instance types when cached information is unavailable.")
 	fs.BoolVarWithEnv(&o.DisableDryRun, "disable-dry-run", "DISABLE_DRY_RUN", false, "If true, then disable dry run validation for LinodeNodeClasses.")
 	fs.StringVar(&o.Mode, "mode", env.WithDefaultString("KARPENTER_MODE", "lke"), "Operating mode: 'lke' for LKE NodePool provisioning, 'instance' for direct Linode instances.")
+	fs.StringVar(&o.NVIDIADRAInstanceTypes, "nvidia-dra-instance-types", env.WithDefaultString("NVIDIA_DRA_INSTANCE_TYPES", ""), "Experimental: comma-separated LKE instance type IDs verified to use exclusive whole GPUs with the gpu.nvidia.com DRA driver. Empty disables predicted DRA inventory. Requires --ignore-dra-requests=false.")
 	fs.DurationVar(&o.LKECreateDeadline, "lke-create-deadline", env.WithDefaultDuration("LKE_CREATE_DEADLINE", 10*time.Second), "Maximum time to wait for an LKE node pool instance to become claimable.")
 	fs.DurationVar(&o.LKETagVerificationTimeout, "lke-tag-verification-timeout", env.WithDefaultDuration("LKE_TAG_VERIFICATION_TIMEOUT", 4*time.Second), "Maximum time to wait for LKE instance tags to be observed after claim.")
 	fs.DurationVar(&o.LKERetryDelay, "lke-retry-delay", env.WithDefaultDuration("LKE_RETRY_DELAY", 2*time.Second), "Delay between LKE create retries when claimable instances are not yet available.")
@@ -73,6 +76,19 @@ func (o *Options) Parse(fs *coreoptions.FlagSet, args ...string) error {
 
 func (o *Options) ToContext(ctx context.Context) context.Context {
 	return ToContext(ctx, o)
+}
+
+// NVIDIADRAInstanceTypeNames returns the explicitly opted-in instance types.
+// The configuration is fixed for the lifetime of the controller.
+func (o *Options) NVIDIADRAInstanceTypeNames() []string {
+	if o.NVIDIADRAInstanceTypes == "" {
+		return nil
+	}
+	names := strings.Split(o.NVIDIADRAInstanceTypes, ",")
+	for i := range names {
+		names[i] = strings.TrimSpace(names[i])
+	}
+	return names
 }
 
 func ToContext(ctx context.Context, opts *Options) context.Context {

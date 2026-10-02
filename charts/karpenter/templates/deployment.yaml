@@ -1,3 +1,25 @@
+{{- $draTypes := .Values.settings.dra.nvidiaGPUInstanceTypes }}
+{{- if not (kindIs "slice" $draTypes) }}
+{{- fail "settings.dra.nvidiaGPUInstanceTypes must be a list of exact instance type IDs" }}
+{{- end }}
+{{- range $draTypes }}
+{{- if not (kindIs "string" .) }}
+{{- fail "settings.dra.nvidiaGPUInstanceTypes entries must be strings" }}
+{{- end }}
+{{- if or (eq (trim .) "") (contains "," .) (regexMatch "\\s" .) }}
+{{- fail "settings.dra.nvidiaGPUInstanceTypes entries must be nonempty IDs without commas or whitespace" }}
+{{- end }}
+{{- end }}
+{{- if $draTypes }}
+{{- if ne .Values.settings.mode "lke" }}
+{{- fail "settings.dra.nvidiaGPUInstanceTypes requires settings.mode=lke" }}
+{{- end }}
+{{- range .Values.controller.env }}
+{{- if or (eq .name "IGNORE_DRA_REQUESTS") (eq .name "NVIDIA_DRA_INSTANCE_TYPES") }}
+{{- fail "configure DRA with settings.dra.nvidiaGPUInstanceTypes instead of duplicate controller.env entries" }}
+{{- end }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -127,6 +149,12 @@ spec:
           {{- with .Values.settings.mode }}
             - name: KARPENTER_MODE
               value: "{{ . }}"
+          {{- end }}
+          {{- with .Values.settings.dra.nvidiaGPUInstanceTypes }}
+            - name: NVIDIA_DRA_INSTANCE_TYPES
+              value: {{ join "," . | quote }}
+            - name: IGNORE_DRA_REQUESTS
+              value: "false"
           {{- end }}
           {{- with .Values.linodeDebug }}
             - name: LINODE_DEBUG

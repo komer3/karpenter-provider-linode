@@ -29,6 +29,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/karpenter/pkg/operator"
+	coreoptions "sigs.k8s.io/karpenter/pkg/operator/options"
 
 	linodecache "github.com/linode/karpenter-provider-linode/pkg/cache"
 	sdk "github.com/linode/karpenter-provider-linode/pkg/linode"
@@ -54,6 +55,15 @@ type Operator struct {
 
 // allow passing a custom Linode client for testing
 func NewOperator(ctx context.Context, op *operator.Operator, linodeClient sdk.LinodeAPI) (*Operator, error) {
+	opts := options.FromContext(ctx)
+	if opts.NVIDIADRAInstanceTypes != "" {
+		if err := opts.Validate(); err != nil {
+			return nil, err
+		}
+		if coreoptions.FromContext(ctx).IgnoreDRARequests {
+			return nil, fmt.Errorf("nvidia-dra-instance-types requires --ignore-dra-requests=false")
+		}
+	}
 	if linodeClient == nil {
 		linodeClient = lo.Must(sdk.CreateLinodeClient(lo.Must(CreateLinodeClientConfig(ctx))))
 	}
@@ -67,7 +77,6 @@ func NewOperator(ctx context.Context, op *operator.Operator, linodeClient sdk.Li
 	}
 	validationCache := cache.New(linodecache.ValidationTTL, linodecache.DefaultCleanupInterval)
 
-	opts := options.FromContext(ctx)
 	var nodeProvider instance.Provider
 	clusterID := 0
 
@@ -128,7 +137,7 @@ func NewOperator(ctx context.Context, op *operator.Operator, linodeClient sdk.Li
 
 	instanceTypeProvider := instancetype.NewDefaultProvider(
 		linodeClient,
-		instancetype.NewDefaultResolver(opts.ClusterRegion),
+		instancetype.NewDefaultResolver(opts.ClusterRegion, opts.NVIDIADRAInstanceTypeNames()...),
 		cache.New(linodecache.InstanceTypesZonesAndOfferingsTTL, linodecache.DefaultCleanupInterval),
 		cache.New(linodecache.InstanceTypesZonesAndOfferingsTTL, linodecache.DefaultCleanupInterval),
 		cache.New(linodecache.DiscoveredCapacityCacheTTL, linodecache.DefaultCleanupInterval),
