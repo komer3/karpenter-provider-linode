@@ -40,6 +40,8 @@ import (
 	"github.com/linode/karpenter-provider-linode/pkg/test"
 )
 
+const draGPUInstanceType = "test-gpu-plan"
+
 // These tests use only an in-memory catalog mock. They do not start envtest or
 // contact Linode or a Kubernetes API server. Run with -run '^TestDRA'.
 func TestDRAInventoryOptIn(t *testing.T) {
@@ -51,16 +53,16 @@ func TestDRAInventoryOptIn(t *testing.T) {
 	}{
 		{name: "disabled", gpus: 4},
 		{name: "not allowlisted", allowed: []string{"another-type"}, gpus: 4},
-		{name: "one GPU", allowed: []string{"test-gpu-plan"}, gpus: 1, want: 1},
-		{name: "multiple GPUs", allowed: []string{"test-gpu-plan"}, gpus: 8, want: 8},
-		{name: "separate accelerator count", allowed: []string{"test-gpu-plan"}, gpus: 2, accelerated: 4, want: 2},
-		{name: "CPU only", allowed: []string{"test-gpu-plan"}},
-		{name: "non GPU accelerator", allowed: []string{"test-gpu-plan"}, accelerated: 4},
-		{name: "invalid negative GPU count", allowed: []string{"test-gpu-plan"}, gpus: -1},
+		{name: "one GPU", allowed: []string{draGPUInstanceType}, gpus: 1, want: 1},
+		{name: "multiple GPUs", allowed: []string{draGPUInstanceType}, gpus: 8, want: 8},
+		{name: "separate accelerator count", allowed: []string{draGPUInstanceType}, gpus: 2, accelerated: 4, want: 2},
+		{name: "CPU only", allowed: []string{draGPUInstanceType}},
+		{name: "non GPU accelerator", allowed: []string{draGPUInstanceType}, accelerated: 4},
+		{name: "invalid negative GPU count", allowed: []string{draGPUInstanceType}, gpus: -1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			info := draType("test-gpu-plan", tc.gpus)
+			info := draType(draGPUInstanceType, tc.gpus)
 			info.AcceleratedDevices = tc.accelerated
 			it := instancetype.NewDefaultResolver(fake.DefaultRegion, tc.allowed...).Resolve(draContext(t), &info, draNodeClass())
 			assertDRAInventory(t, it, tc.want)
@@ -76,10 +78,10 @@ func TestDRAInventoryOptIn(t *testing.T) {
 
 func TestDRAInventoryIsolation(t *testing.T) {
 	t.Parallel()
-	allowed := []string{"test-gpu-plan"}
+	allowed := []string{draGPUInstanceType}
 	resolver := instancetype.NewDefaultResolver(fake.DefaultRegion, allowed...)
 	allowed[0] = "another-type"
-	info := draType("test-gpu-plan", 2)
+	info := draType(draGPUInstanceType, 2)
 	first := resolver.Resolve(draContext(t), &info, draNodeClass())
 	second := resolver.Resolve(draContext(t), &info, draNodeClass())
 	if !reflect.DeepEqual(first.DynamicResources, second.DynamicResources) {
@@ -106,7 +108,7 @@ func TestDRACacheKey(t *testing.T) {
 func TestDRAListGetAndOfferingCache(t *testing.T) {
 	t.Parallel()
 	ctx := draContext(t)
-	types := []linodego.LinodeType{draType("test-gpu-plan", 2), draType("test-cpu-plan", 0)}
+	types := []linodego.LinodeType{draType(draGPUInstanceType, 2), draType("test-cpu-plan", 0)}
 	api := &draCatalogMock{LinodeClient: fake.NewLinodeClient()}
 	t.Cleanup(api.Reset)
 	api.ListTypesOutput.Set(&types)
@@ -123,7 +125,7 @@ func TestDRAListGetAndOfferingCache(t *testing.T) {
 		t.Cleanup(c.Flush)
 	}
 	t.Cleanup(unavailableOfferings.Flush)
-	provider := instancetype.NewDefaultProvider(api, instancetype.NewDefaultResolver(fake.DefaultRegion, "test-gpu-plan"),
+	provider := instancetype.NewDefaultProvider(api, instancetype.NewDefaultResolver(fake.DefaultRegion, draGPUInstanceType),
 		instanceTypesCache, offeringCache, discoveredCapacityCache, unavailableOfferings)
 	if err := provider.UpdateInstanceTypes(ctx); err != nil {
 		t.Fatal(err)
@@ -134,7 +136,7 @@ func TestDRAListGetAndOfferingCache(t *testing.T) {
 	nodeClass := draNodeClass()
 	// Exercise Get before List caches the resolver result, then repeated List
 	// and Get calls including the offering-cache hit path.
-	before, err := provider.Get(ctx, nodeClass, "test-gpu-plan")
+	before, err := provider.Get(ctx, nodeClass, draGPUInstanceType)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,20 +146,8 @@ func TestDRAListGetAndOfferingCache(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(types) != 2 {
-			t.Fatalf("expected two types, got %d", len(types))
-		}
-		for _, it := range types {
-			want := 0
-			if it.Name == "test-gpu-plan" {
-				want = 2
-			}
-			assertDRAInventory(t, it, want)
-			if len(it.Offerings) != 1 || !it.Offerings[0].Available {
-				t.Fatalf("expected an available offering for %s", it.Name)
-			}
-		}
-		cached, err := provider.Get(ctx, nodeClass, "test-gpu-plan")
+		assertDRAListedTypes(t, types)
+		cached, err := provider.Get(ctx, nodeClass, draGPUInstanceType)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -179,11 +169,28 @@ func TestDRAListGetAndOfferingCache(t *testing.T) {
 	if err := provider.UpdateInstanceTypes(ctx); err != nil {
 		t.Fatal(err)
 	}
-	refreshed, err := provider.Get(ctx, nodeClass, "test-gpu-plan")
+	refreshed, err := provider.Get(ctx, nodeClass, draGPUInstanceType)
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertDRAInventory(t, refreshed, 1)
+}
+
+func assertDRAListedTypes(t *testing.T, types []*cloudprovider.InstanceType) {
+	t.Helper()
+	if len(types) != 2 {
+		t.Fatalf("expected two types, got %d", len(types))
+	}
+	for _, it := range types {
+		want := 0
+		if it.Name == draGPUInstanceType {
+			want = 2
+		}
+		assertDRAInventory(t, it, want)
+		if len(it.Offerings) != 1 || !it.Offerings[0].Available {
+			t.Fatalf("expected an available offering for %s", it.Name)
+		}
+	}
 }
 
 func assertDRAInventory(t *testing.T, it *cloudprovider.InstanceType, count int) {
@@ -206,16 +213,21 @@ func assertDRAInventory(t *testing.T, it *cloudprovider.InstanceType, count int)
 		t.Fatal("whole-GPU inventory must not imply sharing or topology")
 	}
 	for i, device := range slice.Devices {
-		if device.Name.Value() != fmt.Sprintf("gpu-%d", i) {
-			t.Fatalf("unexpected device identity: %v", device.Name.Value())
-		}
-		attr := device.Attributes["type"]
-		if len(device.Attributes) != 1 || attr.StringValue == nil || *attr.StringValue != "gpu" {
-			t.Fatalf("expected only type=gpu, got %+v", device.Attributes)
-		}
-		if len(device.Capacity) != 0 || device.AllowMultipleAllocations || len(device.ConsumesCounters) != 0 {
-			t.Fatal("whole-GPU inventory must not invent memory or sharing")
-		}
+		assertDRADevice(t, device, i)
+	}
+}
+
+func assertDRADevice(t *testing.T, device cloudprovider.Device, index int) {
+	t.Helper()
+	if device.Name.Value() != fmt.Sprintf("gpu-%d", index) {
+		t.Fatalf("unexpected device identity: %v", device.Name.Value())
+	}
+	attr := device.Attributes["type"]
+	if len(device.Attributes) != 1 || attr.StringValue == nil || *attr.StringValue != "gpu" {
+		t.Fatalf("expected only type=gpu, got %+v", device.Attributes)
+	}
+	if len(device.Capacity) != 0 || device.AllowMultipleAllocations || len(device.ConsumesCounters) != 0 {
+		t.Fatal("whole-GPU inventory must not invent memory or sharing")
 	}
 }
 
@@ -239,7 +251,7 @@ const nvidiaWholeGPUSelector = "device.driver == 'gpu.nvidia.com' && device.attr
 func TestDRAWholeGPUAllocation(t *testing.T) {
 	t.Parallel()
 	ctx := draContext(t)
-	info := draType("test-gpu-plan", 2)
+	info := draType(draGPUInstanceType, 2)
 	it := instancetype.NewDefaultResolver(fake.DefaultRegion, info.ID).Resolve(ctx, &info, draNodeClass())
 	allocator := draAllocator(t, nvidiaWholeGPUSelector)
 	nodeA := &draNodeClaimMock{name: "node-a", instanceType: it}
@@ -280,7 +292,7 @@ func TestDRASelectorAndOptInRejection(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			info := draType("test-gpu-plan", 2)
+			info := draType(draGPUInstanceType, 2)
 			var allowed []string
 			if tc.enabled {
 				allowed = []string{info.ID}

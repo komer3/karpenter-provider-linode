@@ -35,6 +35,7 @@ import (
 // These are local Helm template unit tests with fixture values, not cluster tests.
 // No Kubernetes client, Helm install, or network connection is used.
 func TestDRAChart(t *testing.T) {
+	helm, env := draHelmEnvironment(t)
 	t.Parallel()
 	for _, tc := range []struct {
 		name, values, allowlist string
@@ -45,7 +46,7 @@ func TestDRAChart(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			output, err := renderDRAChart(t, tc.values)
+			output, err := renderDRAChart(t, helm, env, tc.values)
 			if err != nil {
 				t.Fatalf("helm template: %v\n%s", err, output)
 			}
@@ -92,6 +93,7 @@ func assertDRAChart(t *testing.T, deployment *appsv1.Deployment, role *rbacv1.Cl
 }
 
 func TestDRAChartRejectsConflictingConfiguration(t *testing.T) {
+	helm, env := draHelmEnvironment(t)
 	t.Parallel()
 	for _, tc := range []struct{ name, values, want string }{
 		{name: "empty entry", values: "settings:\n  dra:\n    nvidiaGPUInstanceTypes: [\"\"]\n", want: "must be nonempty IDs"},
@@ -105,7 +107,7 @@ func TestDRAChartRejectsConflictingConfiguration(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			output, err := renderDRAChart(t, tc.values)
+			output, err := renderDRAChart(t, helm, env, tc.values)
 			if err == nil || !strings.Contains(string(output), tc.want) {
 				t.Fatalf("expected %q error, got %v\n%s", tc.want, err, output)
 			}
@@ -113,18 +115,27 @@ func TestDRAChartRejectsConflictingConfiguration(t *testing.T) {
 	}
 }
 
-func renderDRAChart(t *testing.T, values string) ([]byte, error) {
+// Capture the tool path and subprocess environment before t.Parallel because
+// the existing Options suite clears the process environment after each spec.
+func draHelmEnvironment(t *testing.T) (helm string, env []string) {
 	t.Helper()
 	helm, err := exec.LookPath("helm")
 	if err != nil {
 		t.Fatal("Helm is required for these local template unit tests")
 	}
+	return helm, os.Environ()
+}
+
+func renderDRAChart(t *testing.T, helm string, env []string, values string) ([]byte, error) {
+	t.Helper()
 	valuesFile := filepath.Join(t.TempDir(), "values.yaml")
 	if err := os.WriteFile(valuesFile, []byte("credentialsSecretRef: test-credentials\n"+values), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return exec.CommandContext(t.Context(), helm, "template", "dra-test", "../../../charts/karpenter", "--namespace", "karpenter",
-		"--values", valuesFile, "--show-only", "templates/deployment.yaml", "--show-only", "templates/clusterrole-core.yaml").CombinedOutput()
+	cmd := exec.CommandContext(t.Context(), helm, "template", "dra-test", "../../../charts/karpenter", "--namespace", "karpenter",
+		"--values", valuesFile, "--show-only", "templates/deployment.yaml", "--show-only", "templates/clusterrole-core.yaml")
+	cmd.Env = env
+	return cmd.CombinedOutput()
 }
 
 func decodeDRAChart(t *testing.T, output []byte) (*appsv1.Deployment, *rbacv1.ClusterRole) {
